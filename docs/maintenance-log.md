@@ -1414,3 +1414,20 @@
   - 限流仍先发送包含失败原因的摘要，再返回 `rate_limited` 正常结束；不会把限流记为领取成功，其他领取异常仍保持失败。未改动登录、hCaptcha、浏览器或 checkout 业务逻辑，保留 `master` 的 `70354be` 浏览器修复。
   - 对最新 PR 代码完成静态复审，并核对 WXPush 上游 `/wxsend` 响应协议；Ruff、Black、Python 语法、工作流 YAML 和 `git diff --check` 检查通过。
   - 按仓库规则，本轮未执行测试或真实微信投递。新增文件包含 29 个测试定义，但仍缺少发送异常、双渠道调度及限流返回值的集成回归覆盖；不能将此前浏览器修复的 70 项测试结果视为本 PR 的验证结果。
+
+### 2026-10-22 结账验证码解出后不再重复求解（反馈式门控）
+
+- 现象：
+  - 结账流程里验证码已经解开（`hCaptcha challenge result | signal=success`），几秒后又进了解题循环，随后连续报 `Cannot find a valid challenge frame`，把那次唯一的成功白白烧掉（2026-10-21 22:07 实测）。
+  - 反方向也存在：`Place Order` 点击其实已经产生进展（结账弹窗正在展开），程序仍然因为页面上残留的 hCaptcha iframe 去解一遍已经不存在的验证码。
+- 根因判断：
+  - `_is_checkout_security_check_visible()` 依赖页面上是否存在 hCaptcha iframe，而 hCaptcha 通过后勾选框 iframe 不会从 DOM 卸载，判据在成功之后仍然为真。
+  - `_handle_instant_checkout()` 的两个触发点（状态刷新后、提交点击后）都不看「点击是否产生进展」，也不记得「验证码已经解开过」，于是反复进入求解循环；而 `_submit_place_order()` 返回的 `click_progressed` 已经现成可用。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `captcha_solved` 记忆：解出之后，状态刷新与提交两条路径都不再重解，改为重新获取支付按钮继续提交。
+  - 提交后的安全检查改为反馈式门控：`click_progressed` 为真时，把仍然可见的安全检查判为残留标记，不进入求解。
+  - 新增 `CAPTCHA_SOLVED_STALL_LIMIT = 2` 做反馈式复位：解出后连续 2 次提交都没有进展，说明可能真的被重新拦下，清空记忆允许再解一次，避免「死记已解开」导致永远不求解。
+  - 按仓库规则未执行测试；`py_compile`、`ruff`（与改动前同一份计数）、`black -C -l 100`（新增行零差异）、`git diff --check` 复核通过。
