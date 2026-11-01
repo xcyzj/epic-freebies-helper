@@ -1414,3 +1414,26 @@
   - 限流仍先发送包含失败原因的摘要，再返回 `rate_limited` 正常结束；不会把限流记为领取成功，其他领取异常仍保持失败。未改动登录、hCaptcha、浏览器或 checkout 业务逻辑，保留 `master` 的 `70354be` 浏览器修复。
   - 对最新 PR 代码完成静态复审，并核对 WXPush 上游 `/wxsend` 响应协议；Ruff、Black、Python 语法、工作流 YAML 和 `git diff --check` 检查通过。
   - 按仓库规则，本轮未执行测试或真实微信投递。新增文件包含 29 个测试定义，但仍缺少发送异常、双渠道调度及限流返回值的集成回归覆盖；不能将此前浏览器修复的 70 项测试结果视为本 PR 的验证结果。
+
+### 2026-11-01 修正「会话已失效却判定已登录」导致的空转
+
+- 现象：
+  - 使用持久化浏览器 profile（官方 docker 方式挂载 `./volumes`，会话跨运行复用）时，诊断日志一直显示 `Epic Games is already logged in`，但随后每个周免商品点击 `Get` 都被重定向到 `/id/login/switch-account`，页面上出现登录浮层（class 含 `_takeover_`）拦截所有点击。
+  - 每款商品要消耗 4 种点击策略约 4 分钟，整轮十几分钟才在收尾复核时报错，且报错信息完全指不到「未登录」这个根因。
+- 影响范围（为什么仓库自带的 CI 测不出来）：
+  - 仓库的 GitHub Actions workflow 不缓存 `app/volumes/user_data`，每次运行都是全新 profile，因此每次都会真登录一次，不会触发该路径。
+  - 官方 `docker-compose.yml` 自托管部署会挂载 `./volumes`，浏览器 profile 与账号会话跨运行复用；周免一周一次，两次运行的间隔远超账号层 auth 的 8h / 24h 寿命，所以自托管用户基本**每周必然**命中。
+  - 同一份代码在本机直接 `uv run`（`app/volumes` 同样持久化）也会命中。
+- 根因判断：
+  - `EpicAuthorization.invoke()` 只凭 `egs-navigation@isloggedin == "true"` 判定已登录。该标志反映的是商店 token，而商店 token 由 refresh token 在每次页面加载时自动续期（实测 `EPIC_EG1` 寿命 8 小时且滑动续期、`REFRESH_EPIC_EG1` 一年），账号层 `EPIC_AUTH_*` 才是 8 小时 / 24 小时后失效的那一层。因此失效的会话永远不会触发重新登录。
+  - `EpicAgent._check_orders()` 忽略 `_sync_order_history()` 的返回值：探测失败（拿到登录页 HTML 而不是 JSON）被当成「一条拥有记录都没有」，于是已拥有的周免被重新走一遍领取流程。
+- 改动文件：
+  - `app/services/epic_authorization_service.py`
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - `invoke()` 在 `isloggedin == "true"` 之后用订单历史接口复核账号会话（一次导航，约 2 秒），不通过则回到原有 `_login()` 走一次真登录；复核失败会重试一次，避免网络抖动逼出多余登录。不新增任何登录入口。
+  - `_check_orders()` 在订单历史探测失败时立即抛出 `EpicSessionExpiredError`，并把现场证据（截图、当前 URL、页面文本）落盘到 `runtime/purchase_debug/session_probe_failed-*`，便于事后区分「会话失效」与「接口临时故障」。
+  - 真机验证（自托管 Docker + 持久化 profile）：修复前同一失效 profile 下判定「已登录」后 3 款商品全部空转；修复后日志先出现 `Store reports a logged-in session but the order-history probe rejected it; forcing a fresh login`，随后 `Login success` 并正常领取成功、进程 exit 0，全程 6 分 47 秒，无需人工清理 cookie。
+  - `.env` 与 GitHub Actions 配置未改动；Actions 每次全新 profile 会真登录，行为不受影响。
+  - Ruff（该文件 52 项既有告警）与 Black（两个文件原本就需要重排）结果与改动前基线完全一致，未引入新的静态检查问题；`python -m py_compile` 通过。按仓库规则未运行测试。
