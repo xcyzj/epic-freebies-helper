@@ -12,7 +12,9 @@ env:
 
 jobs:
   epic-gamer:
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 已在 2026-10 迁移到 26.04，而当前 Playwright
+    # 版本不支持 firefox on ubuntu26.04-x64，会导致兜底浏览器安装步骤直接失败。
+    runs-on: ubuntu-24.04
     # A single account run can take 15-20 minutes. Multi-account runs are
     # sequential, so scale the timeout with the number of accounts by setting
     # a repository variable JOB_TIMEOUT_MINUTES (Settings -> Secrets and
