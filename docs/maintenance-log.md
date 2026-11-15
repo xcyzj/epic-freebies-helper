@@ -1520,3 +1520,22 @@
   - 跨平台判重（同一 namespace 下 PC / Android / iOS 被误判为已拥有）不在此 PR 范围内，另见独立修复 PR。
   - 已知限制：Android 商品全球可领，iOS 商品 Epic 仅面向欧盟区域提供，非欧盟账号可能在结账时被拒；因此 iOS 开关默认关闭，需先人工验证再开启。
   - 按仓库规则未执行测试；`py_compile`、`ruff`、`black -C -l 100`、`git diff --check` 复核通过。
+### 2026-11-15 修复结账"安全校验"幽灵面板导致领取流程空转失败
+
+- 现象：
+  - 2026-11-14 自托管 Docker（全新 profile）运行，本周免费游戏 `Knightica` 的 PC / Android / iOS 三个 SKU 全部卡在结账安全校验：`Checkout security check detected - starting solve loop` 之后共 46 次 solve attempt，`follow-up outcome after attempt N: security` 46/46，`Cannot find a valid challenge frame` 45 次，最终 `RuntimeError: Failed to confirm claim flow for promotions`（`collect_weekly_games:2233`）。
+  - GitHub Actions（run `42363510722` 等）表现相同，可稳定复现。
+- 影响范围：
+  - 结账弹窗内的 hCaptcha 处于错误或未渲染状态时无法完成领取；与网络、IP 无关（自托管家宽 `14.120.x` 与 runner `57.154.167.x` 表现一致）。
+  - 不影响已有登录态、商店会话衔接与免费游戏发现。
+- 根因判断：
+  - `_is_checkout_security_check_visible()` 只要文本或 hCaptcha iframe "存在"就判定"仍在验证"：结账弹窗常驻一段隐藏兜底模板（`One more step` / `Please complete a security check to continue` / `Session ID …` / `TRY AGAIN`），并且约 300x74 的勾选框 iframe 会命中 `_visible_hcaptcha_frame_urls()`（默认阈值仅 160x40）。
+  - 此时题面其实从未加载（`challenge-view` 内无可见 `<img>`，`Add to library` 已可见，调试抓取到的 hCaptcha frame 文本只有 `Please try again. / Verify / EN`），于是流程反复对一个不存在的题目发起求解，直到超时。
+- 改动文件：
+  - `app/services/epic_games_service.py`
+  - `docs/maintenance-log.md`
+- 处理结果：
+  - 新增 `_visible_hcaptcha_challenge_frame_urls()`（250x200 阈值，排除勾选框控件）、`_checkout_submit_visible()`（跨 frame 检查 `Add to library` / `Place Order`）、`_any_challenge_view_visible()`（要求 `challenge-view` 内 `<img>` 可见）。
+  - `_is_checkout_security_check_visible()` 在"无挑战尺寸 iframe + 提交按钮可见 + 无已渲染题面"时判定为已清除并记录 `treating the security check as cleared`；真实题面仍走原有 solve loop，行为不变。
+  - 2026-11-15 14:00 在自托管冷 profile 上以该补丁重跑：`treating the security check as cleared` 出现 14 次，`Checkout security check solved into checkout` 后正常下单，最终 `🎉 Confirmed 3 instant claim(s)`，三个 SKU 均产生订单并收到邮件；未打补丁的 2026-11-14 对照运行在同一路径空转 46 次后失败。
+  - Ruff 与 master 基线一致（42 项，无新增）、Black 新增区域无差异、`py_compile` 通过、`git diff --check` 干净；按仓库规则未执行测试。
